@@ -68,6 +68,7 @@ with open("README.md", "r") as fh:
 
 setup(
     name="kilosort",
+    version="4.1.3",
     python_requires='>=3.9',
     license="BSD",
     author="Marius Pachitariu",
@@ -78,10 +79,8 @@ setup(
     url="https://github.com/MouseLand/kilosort",
     setup_requires=[
         'pytest-runner',
-        'setuptools-scm',
     ],
     packages=setuptools.find_packages(),
-    use_scm_version=True,
     install_requires=install_deps,
     tests_require=[
         'pytest'
