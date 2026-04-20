@@ -17,7 +17,7 @@ from kilosort.utils import log_performance
 logger = logging.getLogger(__name__)
 
 
-def neigh_mat(Xd, nskip=1, n_neigh=10, max_sub=25000):
+def neigh_mat(Xd, nskip=1, n_neigh=10, max_sub=25000, device=torch.device('cuda')):
     # Xd is spikes by PCA features in a local neighborhood
     # finding n_neigh neighbors of each spike to a subset of every nskip spike
 
@@ -46,6 +46,9 @@ def neigh_mat(Xd, nskip=1, n_neigh=10, max_sub=25000):
     # exact neighbor search ("brute force")
     # results is dn and kn
     # kn is n_spikes by n_neigh, contains integer indices into Xsub
+    if device == torch.device('mps'):
+        # Avoid segfault in faiss when MPS is active
+        faiss.omp_set_num_threads(1)
     index = faiss.IndexFlatL2(dim)   # build the index
     index.add(Xsub)    # add vectors to the index
     _, kn = index.search(Xd, n_neigh)     # actual search
@@ -70,36 +73,54 @@ def assign_iclust(rows_neigh, isub, kn, tones2, nclust, lam, m, ki, kj, device=t
     n_spikes = kn.shape[0]
 
     ij = torch.vstack((rows_neigh.flatten(), isub[kn].flatten()))
-    xN = coo(ij, tones2.flatten(), (n_spikes, nclust))
-    xN = xN.to_dense()
+    if device == torch.device('mps'):
+        xN = coo(ij, tones2.flatten(), (n_spikes, nclust), device=torch.device('cpu'))
+        xN = xN.to_dense().to(device)
+    else:
+        xN = coo(ij, tones2.flatten(), (n_spikes, nclust))
+        xN = xN.to_dense()
 
     if lam > 0:
-        tones = torch.ones(len(kj), device = device)
-        tzeros = torch.zeros(len(kj), device = device)
-        ij = torch.vstack((tzeros, isub))    
-        kN = coo(ij, tones, (1, nclust))
-    
-        xN = xN - lam/m * (ki.unsqueeze(-1) * kN.to_dense()) 
-    
+        tones = torch.ones(len(kj), device=device)
+        tzeros = torch.zeros(len(kj), device=device)
+        ij = torch.vstack((tzeros, isub))
+        if device == torch.device('mps'):
+            kN = coo(ij, tones, (1, nclust), device=torch.device('cpu'))
+            kN = kN.to_dense().to(device)
+        else:
+            kN = coo(ij, tones, (1, nclust))
+            kN = kN.to_dense()
+
+        xN = xN - lam/m * (ki.unsqueeze(-1) * kN)
+
     iclust = torch.argmax(xN, 1)
 
     return iclust
 
 
-def assign_isub(iclust, kn, tones2, nclust, nsub, lam, m,ki,kj, device=torch.device('cuda')):
+def assign_isub(iclust, kn, tones2, nclust, nsub, lam, m, ki, kj, device=torch.device('cuda')):
     n_neigh = kn.shape[1]
     cols = iclust.unsqueeze(-1).tile((1, n_neigh))
     iis = torch.vstack((kn.flatten(), cols.flatten()))
 
-    xS = coo(iis, tones2.flatten(), (nsub, nclust))
-    xS = xS.to_dense()
+    if device == torch.device('mps'):
+        xS = coo(iis, tones2.flatten(), (nsub, nclust), device=torch.device('cpu'))
+        xS = xS.to_dense().to(device)
+    else:
+        xS = coo(iis, tones2.flatten(), (nsub, nclust))
+        xS = xS.to_dense()
 
     if lam > 0:
-        tones = torch.ones(len(ki), device = device)
-        tzeros = torch.zeros(len(ki), device = device)
-        ij = torch.vstack((tzeros, iclust))    
-        kN = coo(ij, tones, (1, nclust))
-        xS = xS - lam / m * (kj.unsqueeze(-1) * kN.to_dense())
+        tones = torch.ones(len(ki), device=device)
+        tzeros = torch.zeros(len(ki), device=device)
+        ij = torch.vstack((tzeros, iclust))
+        if device == torch.device('mps'):
+            kN = coo(ij, tones, (1, nclust), device=torch.device('cpu'))
+            kN = kN.to_dense().to(device)
+        else:
+            kN = coo(ij, tones, (1, nclust))
+            kN = kN.to_dense()
+        xS = xS - lam / m * (kj.unsqueeze(-1) * kN)
 
     isub = torch.argmax(xS, 1)
     return isub
@@ -126,7 +147,7 @@ def cluster(Xd, iclust=None, kn=None, nskip=1, n_neigh=10, max_sub=25000,
         # kn: n_spikes by n_neigh with integer indices into the spike subset
         #     used for neighbor-finding determined by nskip.
         # M:  n_spikes by nsub, adjacency matrix representation of kn.
-        kn, M = neigh_mat(Xd, nskip=nskip, n_neigh=n_neigh, max_sub=max_sub)
+        kn, M = neigh_mat(Xd, nskip=nskip, n_neigh=n_neigh, max_sub=max_sub, device=device)
     m, ki, kj = Mstats(M, device=device)
 
     if verbose:
@@ -479,8 +500,8 @@ def run(ops, st, tF, mode='template', device=torch.device('cuda'),
 
                 logger.debug(f'Center {ii} | Xd shape: {Xd.shape} | ntemp: {ntemp}')
                 if verbose and Xd.nelement() > 10**8:
-                    logger.info(f'Resetting cuda memory stats for Center {ii}')
                     if device == torch.device('cuda'):
+                        logger.info(f'Resetting cuda memory stats for Center {ii}')
                         torch.cuda.reset_peak_memory_stats(device)
                     v = True
                 if Xd.shape[0] < 1000:
@@ -501,7 +522,8 @@ def run(ops, st, tF, mode='template', device=torch.device('cuda'),
                         if v:
                             log_performance(logger, header='clustering_qr before gc')
                         gc.collect()
-                        torch.cuda.empty_cache()
+                        if device == torch.device('cuda'):
+                            torch.cuda.empty_cache()
                         if v:
                             log_performance(logger, header='clustering_qr after gc')
 

@@ -512,6 +512,8 @@ def load_ops(ops_path, device=None):
     if device is None:
         if torch.cuda.is_available():
             device = torch.device('cuda')
+        elif torch.backends.mps.is_available():
+            device = torch.device('mps')
         else:
             device = torch.device('cpu')
 
@@ -531,6 +533,8 @@ def bfile_from_ops(ops=None, ops_path=None, filename=None, device=None):
     if device is None:
         if torch.cuda.is_available():
             device = torch.device('cuda')
+        elif torch.backends.mps.is_available():
+            device = torch.device('mps')
         else:
             device = torch.device('cpu')
 
@@ -602,6 +606,8 @@ class BinaryRWFile:
         if device is None:
             if torch.cuda.is_available():
                 device = torch.device('cuda')
+            elif torch.backends.mps.is_available():
+                device = torch.device('mps')
             else:
                 device = torch.device('cpu')
         self.device = device
